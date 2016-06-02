@@ -4,6 +4,17 @@ module Toshi
   module Web
 
     class Api < Toshi::Web::Base
+      # Allow cross-origin requests
+      before do
+        headers 'Access-Control-Allow-Origin' => '*',
+                'Access-Control-Allow-Methods' => ['OPTIONS', 'GET', 'POST'],
+                'Access-Control-Allow-Headers' => 'Content-Type'
+      end
+      set :protection, false
+      options '/*' do
+        200
+      end
+
       helpers do
         def format
           fmt = params[:format].to_s
@@ -84,9 +95,10 @@ module Toshi
       ####
 
       # submit new transaction to network
-      put '/transactions.?:format?' do
+      post '/transactions.?:format?' do
         begin
-          ptx = Bitcoin::P::Tx.new([params[:hex]].pack("H*"))
+          json = JSON.parse(request.body.read)
+          ptx = Bitcoin::P::Tx.new([json['hex']].pack("H*"))
         rescue
           return { error: 'malformed transaction' }.to_json
         end
@@ -176,6 +188,21 @@ module Toshi
 
           unspent_outputs = Toshi::Models::Output.to_hash_collection(unspent_outputs)
           json(unspent_outputs)
+        else
+          raise InvalidFormatError
+        end
+      end
+
+      get '/addresses/:address/balance_at.?:format?' do
+        @address = Toshi::Models::Address.where(address: params[:address]).first
+        raise NotFoundError unless @address
+
+        case format
+        when 'json'
+          {
+            balance: @address.balance_at(params[:time].to_i),
+            time: Time.at(params[:time].to_i).utc
+          }.to_json
         else
           raise InvalidFormatError
         end

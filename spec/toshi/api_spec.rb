@@ -515,7 +515,7 @@ describe Toshi::Web::Api, :type => :request do
       new_tx = build_nonstandard_tx(blockchain, [prev_tx], [0], ver=Toshi::CURRENT_TX_VERSION, lock_time=nil, output_pk_script=nil, key_A)
 
       # push the tx via the API
-      put "/transactions", :hex => new_tx.payload.unpack("H*").first
+      post "/transactions", {:hex => new_tx.payload.unpack("H*").first}.to_json
       expect(last_response).to be_ok
       json = JSON.parse(last_response.body)
       expect(json['hash']).to eq(new_tx.hash)
@@ -546,7 +546,7 @@ describe Toshi::Web::Api, :type => :request do
       # try pushing a double-spend
       key_B = blockchain.new_key('B')
       new_tx = build_nonstandard_tx(blockchain, [prev_tx], [0], ver=Toshi::CURRENT_TX_VERSION, lock_time=nil, output_pk_script=nil, key_B)
-      put "/transactions", :hex => new_tx.payload.unpack("H*").first
+      post "/transactions", {:hex => new_tx.payload.unpack("H*").first}.to_json
       expect(last_response).to be_ok
       json = JSON.parse(last_response.body)
       expect(json['error']).to eq('AcceptToMemoryPool() : already spent in the memory pool')
@@ -555,10 +555,108 @@ describe Toshi::Web::Api, :type => :request do
       key_C = blockchain.new_key('C')
       prev_tx = new_tx
       new_tx = build_nonstandard_tx(blockchain, [prev_tx], [0], ver=Toshi::CURRENT_TX_VERSION, lock_time=nil, output_pk_script=nil, key_C)
-      put "/transactions", :hex => new_tx.payload.unpack("H*").first
+      post "/transactions", {:hex => new_tx.payload.unpack("H*").first}.to_json
       expect(last_response).to be_ok
       json = JSON.parse(last_response.body)
       expect(json['error']).to eq('AcceptToMemoryPool() : transaction missing inputs')
     end
+
+    it 'verifies resurrected orphan transactions contain an amount' do
+      processor = Toshi::Processor.new
+      blockchain = Blockchain.new
+
+      # process simple chain to give us a some confirmed outputs.
+      blockchain.load_from_json("simple_chain_1.json")
+      blockchain.chain['main'].each{|height, block|
+        processor.process_block(block, raise_errors=true)
+      }
+
+      # build spend
+      prev_tx = blockchain.chain['main']['7'].tx[1]
+      key_A = blockchain.new_key('A')
+      parent_tx = build_nonstandard_tx(blockchain, [prev_tx], [0], ver=Toshi::CURRENT_TX_VERSION, lock_time=nil, output_pk_script=nil, key_A)
+
+      # build a spend of a spend
+      key_B = blockchain.new_key('B')
+      new_tx = build_nonstandard_tx(blockchain, [parent_tx], [0], ver=Toshi::CURRENT_TX_VERSION, lock_time=nil, output_pk_script=nil, key_B, fee=10000)
+
+      # push the tx via the API
+      post "/transactions", {:hex => new_tx.payload.unpack("H*").first}.to_json
+      expect(last_response).to be_ok
+      json = JSON.parse(last_response.body)
+      expect(json['error']).to eq('AcceptToMemoryPool() : transaction missing inputs')
+
+      # look for it
+      get "/transactions/#{new_tx.hash}"
+      expect(last_response).to be_ok
+      json = JSON.parse(last_response.body)
+      expect(json['hash']).to eq(new_tx.hash)
+      expect(json['version']).to eq(1)
+      expect(json['lock_time']).to eq(0)
+      expect(json['size']).to eq(new_tx.payload.bytesize)
+      expect(json['inputs'][0]).to be_nil # missing inputs
+      expect(json['outputs'][0]['amount']).to eq(2500000000-10000)
+      expect(json['outputs'][0]['spent']).to eq(false)
+      script = Bitcoin::Script.new(new_tx.outputs[0].pk_script)
+      expect(json['outputs'][0]['script']).to eq(script.to_string)
+      expect(json['outputs'][0]['script_hex']).to eq(new_tx.outputs[0].pk_script.unpack("H*")[0])
+      expect(json['outputs'][0]['script_type']).to eq('hash160')
+      expect(json['outputs'][0]['addresses'][0]).to eq(blockchain.address_from_label('B'))
+      expect(json['amount']).to eq(0) # expect amount to be 0 for now
+      expect(json['fees']).to eq(0)
+      expect(json['confirmations']).to eq(0)
+      expect(json['pool']).to eq('orphan')
+
+      # push the parent tx via the API
+      post "/transactions", {:hex => parent_tx.payload.unpack("H*").first}.to_json
+      expect(last_response).to be_ok
+      json = JSON.parse(last_response.body)
+      expect(json['error']).to be_nil
+
+      # look for the child again
+      get "/transactions/#{new_tx.hash}"
+      expect(last_response).to be_ok
+      json = JSON.parse(last_response.body)
+      expect(json['hash']).to eq(new_tx.hash)
+      expect(json['version']).to eq(1)
+      expect(json['lock_time']).to eq(0)
+      expect(json['size']).to eq(new_tx.payload.bytesize)
+      expect(json['inputs'][0]['previous_transaction_hash']).to eq(parent_tx.hash)
+      expect(json['inputs'][0]['output_index']).to eq(0)
+      expect(json['inputs'][0]['amount']).to eq(2500000000)
+      expect(json['outputs'][0]['amount']).to eq(2500000000-10000)
+      expect(json['outputs'][0]['spent']).to eq(false)
+      script = Bitcoin::Script.new(new_tx.outputs[0].pk_script)
+      expect(json['outputs'][0]['script']).to eq(script.to_string)
+      expect(json['outputs'][0]['script_hex']).to eq(new_tx.outputs[0].pk_script.unpack("H*")[0])
+      expect(json['outputs'][0]['script_type']).to eq('hash160')
+      expect(json['outputs'][0]['addresses'][0]).to eq(blockchain.address_from_label('B'))
+      expect(json['amount']).to eq(2500000000-10000) # expect correct amount now
+      expect(json['fees']).to eq(10000) # look for the fee too
+      expect(json['confirmations']).to eq(0)
+      expect(json['pool']).to eq('memory')
+    end
   end
+
+  describe 'verify we properly handle /addresses/:hash/unspent_outputs' do
+    it 'make sure we find unspent outputs with proper confirmations' do
+      processor = Toshi::Processor.new
+      blockchain = Blockchain.new
+
+      blockchain.load_from_json("simple_chain_1.json")
+      blockchain.chain['main'].each{|height, block|
+        processor.process_block(block, raise_errors=true)
+      }
+
+      tx = blockchain.chain['main']['0'].tx[0]
+      script = Bitcoin::Script.new(tx.outputs[0].pk_script)
+      address = script.get_addresses[0]
+
+      get "/addresses/#{address}/unspent_outputs"
+      expect(last_response).to be_ok
+      json = JSON.parse(last_response.body)
+      expect(json[0]['confirmations']).to eq(Toshi::Models::Block.count)
+    end
+  end
+
 end

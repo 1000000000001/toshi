@@ -78,8 +78,17 @@ Toshi uses [Vagrant](http://www.vagrantup.com/) to install and run all prerequis
 
 Alternatively, you can use [Docker](https://www.docker.com/):
 
-    $ docker build -t=coinbase/node .
-    $ docker run -e REDIS_URL=redis://... -e DATABASE_URL=postgres://... -e TOSHI_ENV=production coinbase/node foreman start
+    $ docker build -t=coinbase/toshi .
+    $ docker run -e REDIS_URL=redis://... -e DATABASE_URL=postgres://... -e TOSHI_ENV=production coinbase/toshi foreman start
+
+### Bootstrap.dat
+
+Toshi can import the standard `bootstrap.dat` file that bitcoind uses to load
+the beginning of the blockchain using the `./bin/bootstrap.rb` command.
+
+    export BOOTSTRAP_FILE=/path/to/bootstrap.dat
+    export TOSHI_ENV=production
+    ./bin/bootstrap.rb
 
 ### Deployment
 
